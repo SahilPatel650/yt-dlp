@@ -52,6 +52,7 @@ from .utils import (
     DEFAULT_OUTTMPL,
     IDENTITY,
     LINK_TEMPLATES,
+    MEDIA_EXTENSIONS,
     NO_DEFAULT,
     NUMBER_RE,
     OUTTMPL_TYPES,
@@ -106,6 +107,7 @@ from .utils import (
     iri_to_uri,
     join_nonempty,
     locked_file,
+    make_archive_id,
     make_dir,
     make_HTTPS_handler,
     merge_headers,
@@ -543,9 +545,9 @@ class YoutubeDL:
         'page_url', 'app', 'play_path', 'tc_url', 'flash_version', 'rtmp_live', 'rtmp_conn', 'rtmp_protocol', 'rtmp_real_time'
     }
     _format_selection_exts = {
-        'audio': {'m4a', 'mp3', 'ogg', 'aac'},
-        'video': {'mp4', 'flv', 'webm', '3gp'},
-        'storyboards': {'mhtml'},
+        'audio': set(MEDIA_EXTENSIONS.common_audio),
+        'video': set(MEDIA_EXTENSIONS.common_video + ('3gp', )),
+        'storyboards': set(MEDIA_EXTENSIONS.storyboards),
     }
 
     def __init__(self, params=None, auto_init=True):
@@ -1161,6 +1163,9 @@ class YoutubeDL:
             if mdict['strf_format']:
                 value = strftime_or_none(value, mdict['strf_format'].replace('\\,', ','))
 
+            # XXX: Workaround for https://github.com/yt-dlp/yt-dlp/issues/4485
+            if sanitize and value == '':
+                value = None
             return value
 
         na = self.params.get('outtmpl_na_placeholder', 'NA')
@@ -1562,7 +1567,8 @@ class YoutubeDL:
         result_type = ie_result.get('_type', 'video')
 
         if result_type in ('url', 'url_transparent'):
-            ie_result['url'] = sanitize_url(ie_result['url'])
+            ie_result['url'] = sanitize_url(
+                ie_result['url'], scheme='http' if self.params.get('prefer_insecure') else 'https')
             if ie_result.get('original_url'):
                 extra_info.setdefault('original_url', ie_result['original_url'])
 
@@ -1713,7 +1719,7 @@ class YoutubeDL:
         assert ie_result['_type'] in ('playlist', 'multi_video')
 
         common_info = self._playlist_infodict(ie_result, strict=True)
-        title = common_info.get('title') or '<Untitled>'
+        title = common_info.get('playlist') or '<Untitled>'
         if self._match_entry(common_info, incomplete=True) is not None:
             return
         self.to_screen(f'[download] Downloading {ie_result["_type"]}: {title}')
@@ -1733,8 +1739,8 @@ class YoutubeDL:
             # Better to do this after potentially exhausting entries
             ie_result['playlist_count'] = all_entries.get_full_count()
 
-        common_info = self._playlist_infodict(ie_result, n_entries=int_or_none(n_entries))
-        ie_copy = collections.ChainMap(ie_result, common_info)
+        extra = self._playlist_infodict(ie_result, n_entries=int_or_none(n_entries))
+        ie_copy = collections.ChainMap(ie_result, extra)
 
         _infojson_written = False
         write_playlist_files = self.params.get('allow_playlist_files', True)
@@ -1781,13 +1787,14 @@ class YoutubeDL:
             if not lazy and 'playlist-index' in self.params.get('compat_opts', []):
                 playlist_index = ie_result['requested_entries'][i]
 
-            extra = {
+            entry_copy = collections.ChainMap(entry, {
                 **common_info,
+                'n_entries': int_or_none(n_entries),
                 'playlist_index': playlist_index,
                 'playlist_autonumber': i + 1,
-            }
+            })
 
-            if self._match_entry(collections.ChainMap(entry, extra), incomplete=True) is not None:
+            if self._match_entry(entry_copy, incomplete=True) is not None:
                 continue
 
             self.to_screen('[download] Downloading video %s of %s' % (
@@ -1797,6 +1804,10 @@ class YoutubeDL:
                 Process=Popen('progressBar %s %s' % (str(i),str(n_entries),), shell=True)
                 Process=Popen('echo "%s" > posfile; echo "%s" >> posfile' % (str(i),str(n_entries),), shell=True)
 
+            extra.update({
+                'playlist_index': playlist_index,
+                'playlist_autonumber': i + 1,
+            })
             entry_result = self.__process_iterable_entry(entry, download, extra)
             if not entry_result:
                 failures += 1
@@ -2482,7 +2493,7 @@ class YoutubeDL:
         info_dict['_has_drm'] = any(f.get('has_drm') for f in formats) or None
         if not self.params.get('allow_unplayable_formats'):
             formats = [f for f in formats if not f.get('has_drm')]
-            if info_dict['_has_drm'] and all(
+            if info_dict['_has_drm'] and formats and all(
                     f.get('acodec') == f.get('vcodec') == 'none' for f in formats):
                 self.report_warning(
                     'This video is DRM protected and only images are available for download. '
@@ -3447,18 +3458,16 @@ class YoutubeDL:
                     break
             else:
                 return
-        return f'{extractor.lower()} {video_id}'
+        return make_archive_id(extractor, video_id)
 
     def in_download_archive(self, info_dict):
         fn = self.params.get('download_archive')
         if fn is None:
             return False
 
-        vid_id = self._make_archive_id(info_dict)
-        if not vid_id:
-            return False  # Incomplete video information
-
-        return vid_id in self.archive
+        vid_ids = [self._make_archive_id(info_dict)]
+        vid_ids.extend(info_dict.get('_old_archive_ids', []))
+        return any(id_ in self.archive for id_ in vid_ids)
 
     def record_download_archive(self, info_dict):
         fn = self.params.get('download_archive')

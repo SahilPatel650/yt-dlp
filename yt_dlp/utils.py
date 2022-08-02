@@ -150,21 +150,6 @@ MONTH_NAMES = {
         'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
 }
 
-KNOWN_EXTENSIONS = (
-    'mp4', 'm4a', 'm4p', 'm4b', 'm4r', 'm4v', 'aac',
-    'flv', 'f4v', 'f4a', 'f4b',
-    'webm', 'ogg', 'ogv', 'oga', 'ogx', 'spx', 'opus',
-    'mkv', 'mka', 'mk3d',
-    'avi', 'divx',
-    'mov',
-    'asf', 'wmv', 'wma',
-    '3gp', '3g2',
-    'mp3',
-    'flac',
-    'ape',
-    'wav',
-    'f4f', 'f4m', 'm3u8', 'smil')
-
 # needed for sanitizing filenames in restricted mode
 ACCENT_CHARS = dict(zip('ÂÃÄÀÁÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖŐØŒÙÚÛÜŰÝÞßàáâãäåæçèéêëìíîïðñòóôõöőøœùúûüűýþÿ',
                         itertools.chain('AAAAAA', ['AE'], 'CEEEEIIIIDNOOOOOOO', ['OE'], 'UUUUUY', ['TH', 'ss'],
@@ -223,6 +208,7 @@ DATE_FORMATS_DAY_FIRST.extend([
     '%d/%m/%Y',
     '%d/%m/%y',
     '%d/%m/%Y %H:%M:%S',
+    '%d-%m-%Y %H:%M',
 ])
 
 DATE_FORMATS_MONTH_FIRST = list(DATE_FORMATS)
@@ -613,7 +599,10 @@ def sanitize_open(filename, open_mode):
     if filename == '-':
         if sys.platform == 'win32':
             import msvcrt
-            msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+
+            # stdout may be any IO stream. Eg, when using contextlib.redirect_stdout
+            with contextlib.suppress(io.UnsupportedOperation):
+                msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
         return (sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else sys.stdout, filename)
 
     for attempt in range(2):
@@ -717,13 +706,13 @@ def sanitize_path(s, force=False):
     return os.path.join(*sanitized_path)
 
 
-def sanitize_url(url):
+def sanitize_url(url, *, scheme='http'):
     # Prepend protocol-less URLs with `http:` scheme in order to mitigate
     # the number of unwanted failures due to missing protocol
     if url is None:
         return
     elif url.startswith('//'):
-        return 'http:%s' % url
+        return f'{scheme}:{url}'
     # Fix some common typos seen so far
     COMMON_TYPOS = (
         # https://github.com/ytdl-org/youtube-dl/issues/15649
@@ -5644,6 +5633,83 @@ class Namespace(types.SimpleNamespace):
     @property
     def items_(self):
         return self.__dict__.items()
+
+
+MEDIA_EXTENSIONS = Namespace(
+    common_video=('avi', 'flv', 'mkv', 'mov', 'mp4', 'webm'),
+    video=('3g2', '3gp', 'f4v', 'mk3d', 'divx', 'mpg', 'ogv', 'm4v', 'wmv'),
+    common_audio=('aiff', 'alac', 'flac', 'm4a', 'mka', 'mp3', 'ogg', 'opus', 'wav'),
+    audio=('aac', 'ape', 'asf', 'f4a', 'f4b', 'm4b', 'm4p', 'm4r', 'oga', 'ogx', 'spx', 'vorbis', 'wma'),
+    thumbnails=('jpg', 'png', 'webp'),
+    storyboards=('mhtml', ),
+    subtitles=('srt', 'vtt', 'ass', 'lrc'),
+    manifests=('f4f', 'f4m', 'm3u8', 'smil', 'mpd'),
+)
+MEDIA_EXTENSIONS.video += MEDIA_EXTENSIONS.common_video
+MEDIA_EXTENSIONS.audio += MEDIA_EXTENSIONS.common_audio
+
+KNOWN_EXTENSIONS = (*MEDIA_EXTENSIONS.video, *MEDIA_EXTENSIONS.audio, *MEDIA_EXTENSIONS.manifests)
+
+
+class RetryManager:
+    """Usage:
+        for retry in RetryManager(...):
+            try:
+                ...
+            except SomeException as err:
+                retry.error = err
+                continue
+    """
+    attempt, _error = 0, None
+
+    def __init__(self, _retries, _error_callback, **kwargs):
+        self.retries = _retries or 0
+        self.error_callback = functools.partial(_error_callback, **kwargs)
+
+    def _should_retry(self):
+        return self._error is not NO_DEFAULT and self.attempt <= self.retries
+
+    @property
+    def error(self):
+        if self._error is NO_DEFAULT:
+            return None
+        return self._error
+
+    @error.setter
+    def error(self, value):
+        self._error = value
+
+    def __iter__(self):
+        while self._should_retry():
+            self.error = NO_DEFAULT
+            self.attempt += 1
+            yield self
+            if self.error:
+                self.error_callback(self.error, self.attempt, self.retries)
+
+    @staticmethod
+    def report_retry(e, count, retries, *, sleep_func, info, warn, error=None, suffix=None):
+        """Utility function for reporting retries"""
+        if count > retries:
+            if error:
+                return error(f'{e}. Giving up after {count - 1} retries') if count > 1 else error(str(e))
+            raise e
+
+        if not count:
+            return warn(e)
+        elif isinstance(e, ExtractorError):
+            e = remove_end(e.cause or e.orig_msg, '.')
+        warn(f'{e}. Retrying{format_field(suffix, None, " %s")} ({count}/{retries})...')
+
+        delay = float_or_none(sleep_func(n=count - 1)) if callable(sleep_func) else sleep_func
+        if delay:
+            info(f'Sleeping {delay:.2f} seconds ...')
+            time.sleep(delay)
+
+
+def make_archive_id(ie, video_id):
+    ie_key = ie if isinstance(ie, str) else ie.ie_key()
+    return f'{ie_key.lower()} {video_id}'
 
 
 # Deprecated
