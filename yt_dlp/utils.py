@@ -150,6 +150,16 @@ MONTH_NAMES = {
         'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
 }
 
+# From https://github.com/python/cpython/blob/3.11/Lib/email/_parseaddr.py#L36-L42
+TIMEZONE_NAMES = {
+    'UT': 0, 'UTC': 0, 'GMT': 0, 'Z': 0,
+    'AST': -4, 'ADT': -3,  # Atlantic (used in Canada)
+    'EST': -5, 'EDT': -4,  # Eastern
+    'CST': -6, 'CDT': -5,  # Central
+    'MST': -7, 'MDT': -6,  # Mountain
+    'PST': -8, 'PDT': -7   # Pacific
+}
+
 # needed for sanitizing filenames in restricted mode
 ACCENT_CHARS = dict(zip('ÂÃÄÀÁÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖŐØŒÙÚÛÜŰÝÞßàáâãäåæçèéêëìíîïðñòóôõöőøœùúûüűýþÿ',
                         itertools.chain('AAAAAA', ['AE'], 'CEEEEIIIIDNOOOOOOO', ['OE'], 'UUUUUY', ['TH', 'ss'],
@@ -581,9 +591,14 @@ class LenientJSONDecoder(json.JSONDecoder):
     def decode(self, s):
         if self.transform_source:
             s = self.transform_source(s)
-        if self.ignore_extra:
-            return self.raw_decode(s.lstrip())[0]
-        return super().decode(s)
+        try:
+            if self.ignore_extra:
+                return self.raw_decode(s.lstrip())[0]
+            return super().decode(s)
+        except json.JSONDecodeError as e:
+            if e.pos is not None:
+                raise type(e)(f'{e.msg} in {s[e.pos-10:e.pos+10]!r}', s, e.pos)
+            raise
 
 
 def sanitize_open(filename, open_mode):
@@ -600,7 +615,7 @@ def sanitize_open(filename, open_mode):
         if sys.platform == 'win32':
             import msvcrt
 
-            # stdout may be any IO stream. Eg, when using contextlib.redirect_stdout
+            # stdout may be any IO stream, e.g. when using contextlib.redirect_stdout
             with contextlib.suppress(io.UnsupportedOperation):
                 msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
         return (sys.stdout.buffer if hasattr(sys.stdout, 'buffer') else sys.stdout, filename)
@@ -776,8 +791,8 @@ def _htmlentity_transform(entity_with_semicolon):
     if entity in html.entities.name2codepoint:
         return chr(html.entities.name2codepoint[entity])
 
-    # TODO: HTML5 allows entities without a semicolon. For example,
-    # '&Eacuteric' should be decoded as 'Éric'.
+    # TODO: HTML5 allows entities without a semicolon.
+    # E.g. '&Eacuteric' should be decoded as 'Éric'.
     if entity_with_semicolon in html.entities.html5:
         return html.entities.html5[entity_with_semicolon]
 
@@ -818,8 +833,8 @@ def escapeHTML(text):
 
 
 def process_communicate_or_kill(p, *args, **kwargs):
-    write_string('DeprecationWarning: yt_dlp.utils.process_communicate_or_kill is deprecated '
-                 'and may be removed in a future version. Use yt_dlp.utils.Popen.communicate_or_kill instead')
+    deprecation_warning(f'"{__name__}.process_communicate_or_kill" is deprecated and may be removed '
+                        f'in a future version. Use "{__name__}.Popen.communicate_or_kill" instead')
     return Popen.communicate_or_kill(p, *args, **kwargs)
 
 
@@ -830,12 +845,35 @@ class Popen(subprocess.Popen):
     else:
         _startupinfo = None
 
-    def __init__(self, *args, text=False, **kwargs):
+    @staticmethod
+    def _fix_pyinstaller_ld_path(env):
+        """Restore LD_LIBRARY_PATH when using PyInstaller
+            Ref: https://github.com/pyinstaller/pyinstaller/blob/develop/doc/runtime-information.rst#ld_library_path--libpath-considerations
+                 https://github.com/yt-dlp/yt-dlp/issues/4573
+        """
+        if not hasattr(sys, '_MEIPASS'):
+            return
+
+        def _fix(key):
+            orig = env.get(f'{key}_ORIG')
+            if orig is None:
+                env.pop(key, None)
+            else:
+                env[key] = orig
+
+        _fix('LD_LIBRARY_PATH')  # Linux
+        _fix('DYLD_LIBRARY_PATH')  # macOS
+
+    def __init__(self, *args, env=None, text=False, **kwargs):
+        if env is None:
+            env = os.environ.copy()
+        self._fix_pyinstaller_ld_path(env)
+
         if text is True:
             kwargs['universal_newlines'] = True  # For 3.6 compatibility
             kwargs.setdefault('encoding', 'utf-8')
             kwargs.setdefault('errors', 'replace')
-        super().__init__(*args, **kwargs, startupinfo=self._startupinfo)
+        super().__init__(*args, env=env, **kwargs, startupinfo=self._startupinfo)
 
     def communicate_or_kill(self, *args, **kwargs):
         try:
@@ -850,9 +888,9 @@ class Popen(subprocess.Popen):
             self.wait(timeout=timeout)
 
     @classmethod
-    def run(cls, *args, **kwargs):
+    def run(cls, *args, timeout=None, **kwargs):
         with cls(*args, **kwargs) as proc:
-            stdout, stderr = proc.communicate_or_kill()
+            stdout, stderr = proc.communicate_or_kill(timeout=timeout)
             return stdout or '', stderr or '', proc.returncode
 
 
@@ -1464,6 +1502,10 @@ class YoutubeDLHTTPSHandler(urllib.request.HTTPSHandler):
             raise
 
 
+def is_path_like(f):
+    return isinstance(f, (str, bytes, os.PathLike))
+
+
 class YoutubeDLCookieJar(http.cookiejar.MozillaCookieJar):
     """
     See [1] for cookie file format.
@@ -1482,7 +1524,7 @@ class YoutubeDLCookieJar(http.cookiejar.MozillaCookieJar):
 
     def __init__(self, filename=None, *args, **kwargs):
         super().__init__(None, *args, **kwargs)
-        if self.is_path(filename):
+        if is_path_like(filename):
             filename = os.fspath(filename)
         self.filename = filename
 
@@ -1490,13 +1532,9 @@ class YoutubeDLCookieJar(http.cookiejar.MozillaCookieJar):
     def _true_or_false(cndn):
         return 'TRUE' if cndn else 'FALSE'
 
-    @staticmethod
-    def is_path(file):
-        return isinstance(file, (str, bytes, os.PathLike))
-
     @contextlib.contextmanager
     def open(self, file, *, write=False):
-        if self.is_path(file):
+        if is_path_like(file):
             with open(file, 'w' if write else 'r', encoding='utf-8') as f:
                 yield f
         else:
@@ -1577,7 +1615,7 @@ class YoutubeDLCookieJar(http.cookiejar.MozillaCookieJar):
                     if f'{line.strip()} '[0] in '[{"':
                         raise http.cookiejar.LoadError(
                             'Cookies file must be Netscape formatted, not JSON. See  '
-                            'https://github.com/ytdl-org/youtube-dl#how-do-i-pass-cookies-to-youtube-dl')
+                            'https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp')
                     write_string(f'WARNING: skipping cookie file entry due to {e}: {line!r}\n')
                     continue
         cf.seek(0)
@@ -1684,7 +1722,11 @@ def extract_timezone(date_str):
             $)
         ''', date_str)
     if not m:
-        timezone = datetime.timedelta()
+        m = re.search(r'\d{1,2}:\d{1,2}(?:\.\d+)?(?P<tz>\s*[A-Z]+)$', date_str)
+        timezone = TIMEZONE_NAMES.get(m and m.group('tz').strip())
+        if timezone is not None:
+            date_str = date_str[:-len(m.group('tz'))]
+        timezone = datetime.timedelta(hours=timezone or 0)
     else:
         date_str = date_str[:-len(m.group('tz'))]
         if not m.group('sign'):
@@ -1746,7 +1788,8 @@ def unified_timestamp(date_str, day_first=True):
     if date_str is None:
         return None
 
-    date_str = re.sub(r'[,|]', '', date_str)
+    date_str = re.sub(r'\s+', ' ', re.sub(
+        r'(?i)[,|]|(mon|tues?|wed(nes)?|thu(rs)?|fri|sat(ur)?)(day)?', '', date_str))
 
     pm_delta = 12 if re.search(r'(?i)PM', date_str) else 0
     timezone, date_str = extract_timezone(date_str)
@@ -1768,9 +1811,10 @@ def unified_timestamp(date_str, day_first=True):
         with contextlib.suppress(ValueError):
             dt = datetime.datetime.strptime(date_str, expression) - timezone + datetime.timedelta(hours=pm_delta)
             return calendar.timegm(dt.timetuple())
+
     timetuple = email.utils.parsedate_tz(date_str)
     if timetuple:
-        return calendar.timegm(timetuple) + pm_delta * 3600
+        return calendar.timegm(timetuple) + pm_delta * 3600 - timezone.total_seconds()
 
 
 def determine_ext(url, default_ext='unknown_video'):
@@ -1918,7 +1962,7 @@ class DateRange:
 
 def platform_name():
     """ Returns the platform name as a str """
-    write_string('DeprecationWarning: yt_dlp.utils.platform_name is deprecated, use platform.platform instead')
+    deprecation_warning(f'"{__name__}.platform_name" is deprecated, use "platform.platform" instead')
     return platform.platform()
 
 
@@ -1927,13 +1971,16 @@ def system_identifier():
     python_implementation = platform.python_implementation()
     if python_implementation == 'PyPy' and hasattr(sys, 'pypy_version_info'):
         python_implementation += ' version %d.%d.%d' % sys.pypy_version_info[:3]
+    libc_ver = []
+    with contextlib.suppress(OSError):  # We may not have access to the executable
+        libc_ver = platform.libc_ver()
 
     return 'Python %s (%s %s) - %s %s' % (
         platform.python_version(),
         python_implementation,
         platform.architecture()[0],
         platform.platform(),
-        format_field(join_nonempty(*platform.libc_ver(), delim=' '), None, '(%s)'),
+        format_field(join_nonempty(*libc_ver, delim=' '), None, '(%s)'),
     )
 
 
@@ -1962,6 +2009,23 @@ def write_string(s, out=None, encoding=None):
 
     buffer.write(s.encode(enc, 'ignore') if enc else s)
     out.flush()
+
+
+def deprecation_warning(msg, *, printer=None, stacklevel=0, **kwargs):
+    from . import _IN_CLI
+    if _IN_CLI:
+        if msg in deprecation_warning._cache:
+            return
+        deprecation_warning._cache.add(msg)
+        if printer:
+            return printer(f'{msg}{bug_reports_message()}', **kwargs)
+        return write_string(f'ERROR: {msg}{bug_reports_message()}\n', **kwargs)
+    else:
+        import warnings
+        warnings.warn(DeprecationWarning(msg), stacklevel=stacklevel + 3)
+
+
+deprecation_warning._cache = set()
 
 
 def bytes_to_intlist(bs):
@@ -2423,7 +2487,7 @@ def url_basename(url):
 
 
 def base_url(url):
-    return re.match(r'https?://[^?#&]+/', url).group()
+    return re.match(r'https?://[^?#]+/', url).group()
 
 
 def urljoin(base, path):
@@ -2511,6 +2575,8 @@ def strftime_or_none(timestamp, date_format, default=None):
             datetime_object = datetime.datetime.utcfromtimestamp(timestamp)
         elif isinstance(timestamp, str):  # assume YYYYMMDD
             datetime_object = datetime.datetime.strptime(timestamp, '%Y%m%d')
+        date_format = re.sub(  # Support %s on windows
+            r'(?<!%)(%%)*%s', rf'\g<1>{int(datetime_object.timestamp())}', date_format)
         return datetime_object.strftime(date_format)
     except (ValueError, TypeError, AttributeError):
         return default
@@ -3199,7 +3265,7 @@ def strip_jsonp(code):
         r'\g<callback_data>', code)
 
 
-def js_to_json(code, vars={}):
+def js_to_json(code, vars={}, *, strict=False):
     # vars is a dict of var, val pairs to substitute
     COMMENT_RE = r'/\*(?:(?!\*/).)*?\*/|//[^\n]*\n'
     SKIP_RE = fr'\s*(?:{COMMENT_RE})?\s*'
@@ -3233,14 +3299,17 @@ def js_to_json(code, vars={}):
 
             if v in vars:
                 return vars[v]
+            if strict:
+                raise ValueError(f'Unknown value: {v}')
 
         return '"%s"' % v
 
     def create_map(mobj):
         return json.dumps(dict(json.loads(js_to_json(mobj.group(1) or '[]', vars=vars))))
 
-    code = re.sub(r'new Date\((".+")\)', r'\g<1>', code)
     code = re.sub(r'new Map\((\[.*?\])?\)', create_map, code)
+    if not strict:
+        code = re.sub(r'new Date\((".+")\)', r'\g<1>', code)
 
     return re.sub(r'''(?sx)
         "(?:[^"\\]*(?:\\\\|\\['"nurtbfx/\n]))*[^"\\]*"|
@@ -3482,8 +3551,8 @@ def get_compatible_ext(*, vcodecs, acodecs, vexts, aexts, preferences=None):
         },
     }
 
-    sanitize_codec = functools.partial(try_get, getter=lambda x: x.split('.')[0].replace('0', ''))
-    vcodec, acodec = sanitize_codec(vcodecs[0]), sanitize_codec(acodecs[0])
+    sanitize_codec = functools.partial(try_get, getter=lambda x: x[0].split('.')[0].replace('0', ''))
+    vcodec, acodec = sanitize_codec(vcodecs), sanitize_codec(acodecs)
 
     for ext in preferences or COMPATIBLE_CODECS.keys():
         codec_set = COMPATIBLE_CODECS.get(ext, set())
@@ -3566,7 +3635,7 @@ def determine_protocol(info_dict):
 
     ext = determine_ext(url)
     if ext == 'm3u8':
-        return 'm3u8'
+        return 'm3u8' if info_dict.get('is_live') else 'm3u8_native'
     elif ext == 'f4m':
         return 'f4m'
 
@@ -4843,8 +4912,8 @@ def decode_base_n(string, n=None, table=None):
 
 
 def decode_base(value, digits):
-    write_string('DeprecationWarning: yt_dlp.utils.decode_base is deprecated '
-                 'and may be removed in a future version. Use yt_dlp.decode_base_n instead')
+    deprecation_warning(f'{__name__}.decode_base is deprecated and may be removed '
+                        f'in a future version. Use {__name__}.decode_base_n instead')
     return decode_base_n(value, table=digits)
 
 
@@ -5221,7 +5290,7 @@ def traverse_obj(
     @param path_list        A list of paths which are checked one by one.
                             Each path is a list of keys where each key is a:
                               - None:     Do nothing
-                              - string:   A dictionary key
+                              - string:   A dictionary key / regex group
                               - int:      An index into a list
                               - tuple:    A list of keys all of which will be traversed
                               - Ellipsis: Fetch all values in the object
@@ -5231,12 +5300,16 @@ def traverse_obj(
     @param expected_type    Only accept final value of this type (Can also be any callable)
     @param get_all          Return all the values obtained from a path or only the first one
     @param casesense        Whether to consider dictionary keys as case sensitive
+
+    The following are only meant to be used by YoutubeDL.prepare_outtmpl and is not part of the API
+
+    @param path_list        In addition to the above,
+                              - dict:     Given {k:v, ...}; return {k: traverse_obj(obj, v), ...}
     @param is_user_input    Whether the keys are generated from user input. If True,
                             strings are converted to int/slice if necessary
     @param traverse_string  Whether to traverse inside strings. If True, any
                             non-compatible object will also be converted into a string
-    # TODO: Write tests
-    '''
+    '''  # TODO: Write tests
     if not casesense:
         _lower = lambda k: (k.lower() if isinstance(k, str) else k)
         path_list = (map(_lower, variadic(path)) for path in path_list)
@@ -5250,6 +5323,7 @@ def traverse_obj(
             if isinstance(key, (list, tuple)):
                 obj = [_traverse_obj(obj, sub_key, _current_depth) for sub_key in key]
                 key = ...
+
             if key is ...:
                 obj = (obj.values() if isinstance(obj, dict)
                        else obj if isinstance(obj, (list, tuple, LazyList))
@@ -5257,6 +5331,8 @@ def traverse_obj(
                 _current_depth += 1
                 depth = max(depth, _current_depth)
                 return [_traverse_obj(inner_obj, path[i + 1:], _current_depth) for inner_obj in obj]
+            elif isinstance(key, dict):
+                obj = filter_dict({k: _traverse_obj(obj, v, _current_depth) for k, v in key.items()})
             elif callable(key):
                 if isinstance(obj, (list, tuple, LazyList)):
                     obj = enumerate(obj)
@@ -5313,8 +5389,8 @@ def traverse_obj(
 
 
 def traverse_dict(dictn, keys, casesense=True):
-    write_string('DeprecationWarning: yt_dlp.utils.traverse_dict is deprecated '
-                 'and may be removed in a future version. Use yt_dlp.utils.traverse_obj instead')
+    deprecation_warning(f'"{__name__}.traverse_dict" is deprecated and may be removed '
+                        f'in a future version. Use "{__name__}.traverse_obj" instead')
     return traverse_obj(dictn, keys, casesense=casesense, is_user_input=True, traverse_string=True)
 
 
@@ -5488,6 +5564,9 @@ class Config:
         self.parsed_args = self.own_args
         for location in opts.config_locations or []:
             if location == '-':
+                if location in self._loaded_paths:
+                    continue
+                self._loaded_paths.add(location)
                 self.append_config(shlex.split(read_stdin('options'), comments=True), label='stdin')
                 continue
             location = os.path.join(directory, expand_path(location))
@@ -5745,7 +5824,7 @@ class RetryManager:
         if not count:
             return warn(e)
         elif isinstance(e, ExtractorError):
-            e = remove_end(str(e.cause) or e.orig_msg, '.')
+            e = remove_end(str_or_none(e.cause) or e.orig_msg, '.')
         warn(f'{e}. Retrying{format_field(suffix, None, " %s")} ({count}/{retries})...')
 
         delay = float_or_none(sleep_func(n=count - 1)) if callable(sleep_func) else sleep_func
@@ -5757,6 +5836,43 @@ class RetryManager:
 def make_archive_id(ie, video_id):
     ie_key = ie if isinstance(ie, str) else ie.ie_key()
     return f'{ie_key.lower()} {video_id}'
+
+
+def truncate_string(s, left, right=0):
+    assert left > 3 and right >= 0
+    if s is None or len(s) <= left + right:
+        return s
+    return f'{s[:left-3]}...{s[-right:]}'
+
+
+def orderedSet_from_options(options, alias_dict, *, use_regex=False, start=None):
+    assert 'all' in alias_dict, '"all" alias is required'
+    requested = list(start or [])
+    for val in options:
+        discard = val.startswith('-')
+        if discard:
+            val = val[1:]
+
+        if val in alias_dict:
+            val = alias_dict[val] if not discard else [
+                i[1:] if i.startswith('-') else f'-{i}' for i in alias_dict[val]]
+            # NB: Do not allow regex in aliases for performance
+            requested = orderedSet_from_options(val, alias_dict, start=requested)
+            continue
+
+        current = (filter(re.compile(val, re.I).fullmatch, alias_dict['all']) if use_regex
+                   else [val] if val in alias_dict['all'] else None)
+        if current is None:
+            raise ValueError(val)
+
+        if discard:
+            for item in current:
+                while item in requested:
+                    requested.remove(item)
+        else:
+            requested.extend(current)
+
+    return orderedSet(requested)
 
 
 # Deprecated

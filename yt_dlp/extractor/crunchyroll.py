@@ -114,7 +114,14 @@ class CrunchyrollBaseIE(InfoExtractor):
 
 class CrunchyrollIE(CrunchyrollBaseIE, VRVBaseIE):
     IE_NAME = 'crunchyroll'
-    _VALID_URL = r'https?://(?:(?P<prefix>www|m)\.)?(?P<url>crunchyroll\.(?:com|fr)/(?:media(?:-|/\?id=)|(?!series/|watch/)(?:[^/]+/){1,2}[^/?&]*?)(?P<id>[0-9]+))(?:[/?&]|$)'
+    _VALID_URL = r'''(?x)
+        https?://(?:(?P<prefix>www|m)\.)?(?P<url>
+            crunchyroll\.(?:com|fr)/(?:
+                media(?:-|/\?id=)|
+                (?!series/|watch/)(?:[^/]+/){1,2}[^/?&#]*?
+            )(?P<id>[0-9]+)
+        )(?:[/?&#]|$)'''
+
     _TESTS = [{
         'url': 'http://www.crunchyroll.com/wanna-be-the-strongest-in-the-world/episode-1-an-idol-wrestler-is-born-645513',
         'info_dict': {
@@ -713,15 +720,20 @@ class CrunchyrollBetaBaseIE(CrunchyrollBaseIE):
 
     def _get_params(self, lang):
         if not CrunchyrollBetaBaseIE.params:
+            if self._get_cookies(f'https://beta.crunchyroll.com/{lang}').get('etp_rt'):
+                grant_type, key = 'etp_rt_cookie', 'accountAuthClientId'
+            else:
+                grant_type, key = 'client_id', 'anonClientId'
+
             initial_state, app_config = self._get_beta_embedded_json(self._download_webpage(
                 f'https://beta.crunchyroll.com/{lang}', None, note='Retrieving main page'), None)
             api_domain = app_config['cxApiParams']['apiDomain']
-            basic_token = str(base64.b64encode(('%s:' % app_config['cxApiParams']['accountAuthClientId']).encode('ascii')), 'ascii')
+
             auth_response = self._download_json(
-                f'{api_domain}/auth/v1/token', None, note='Authenticating with cookie',
+                f'{api_domain}/auth/v1/token', None, note=f'Authenticating with grant_type={grant_type}',
                 headers={
-                    'Authorization': 'Basic ' + basic_token
-                }, data='grant_type=etp_rt_cookie'.encode('ascii'))
+                    'Authorization': 'Basic ' + str(base64.b64encode(('%s:' % app_config['cxApiParams'][key]).encode('ascii')), 'ascii')
+                }, data=f'grant_type={grant_type}'.encode('ascii'))
             policy_response = self._download_json(
                 f'{api_domain}/index/v2', None, note='Retrieving signed policy',
                 headers={
@@ -740,25 +752,14 @@ class CrunchyrollBetaBaseIE(CrunchyrollBaseIE):
             CrunchyrollBetaBaseIE.params = (api_domain, bucket, params)
         return CrunchyrollBetaBaseIE.params
 
-    def _redirect_from_beta(self, url, lang, internal_id, display_id, is_episode, iekey):
-        initial_state, app_config = self._get_beta_embedded_json(self._download_webpage(url, display_id), display_id)
-        content_data = initial_state['content']['byId'][internal_id]
-        if is_episode:
-            video_id = content_data['external_id'].split('.')[1]
-            series_id = content_data['episode_metadata']['series_slug_title']
-        else:
-            series_id = content_data['slug_title']
-        series_id = re.sub(r'-{2,}', '-', series_id)
-        url = f'https://www.crunchyroll.com/{lang}{series_id}'
-        if is_episode:
-            url = url + f'/{display_id}-{video_id}'
-        self.to_screen(f'{display_id}: Not logged in. Redirecting to non-beta site - {url}')
-        return self.url_result(url, iekey, display_id)
-
 
 class CrunchyrollBetaIE(CrunchyrollBetaBaseIE):
     IE_NAME = 'crunchyroll:beta'
-    _VALID_URL = r'https?://beta\.crunchyroll\.com/(?P<lang>(?:\w{2}(?:-\w{2})?/)?)watch/(?P<id>\w+)/(?P<display_id>[\w\-]*)/?(?:\?|$)'
+    _VALID_URL = r'''(?x)
+        https?://beta\.crunchyroll\.com/
+        (?P<lang>(?:\w{2}(?:-\w{2})?/)?)
+        watch/(?P<id>\w+)
+        (?:/(?P<display_id>[\w-]+))?/?(?:[?#]|$)'''
     _TESTS = [{
         'url': 'https://beta.crunchyroll.com/watch/GY2P1Q98Y/to-the-future',
         'info_dict': {
@@ -780,7 +781,7 @@ class CrunchyrollBetaIE(CrunchyrollBetaBaseIE):
         },
         'params': {'skip_download': 'm3u8'},
     }, {
-        'url': 'https://beta.crunchyroll.com/watch/GY2P1Q98Y/',
+        'url': 'https://beta.crunchyroll.com/watch/GY2P1Q98Y',
         'only_matching': True,
     }, {
         'url': 'https://beta.crunchyroll.com/pt-br/watch/G8WUN8VKP/the-ruler-of-conspiracy',
@@ -789,10 +790,6 @@ class CrunchyrollBetaIE(CrunchyrollBetaBaseIE):
 
     def _real_extract(self, url):
         lang, internal_id, display_id = self._match_valid_url(url).group('lang', 'id', 'display_id')
-
-        if not self._get_cookies(url).get('etp_rt'):
-            return self._redirect_from_beta(url, lang, internal_id, display_id, True, CrunchyrollIE.ie_key())
-
         api_domain, bucket, params = self._get_params(lang)
 
         episode_response = self._download_json(
@@ -867,7 +864,11 @@ class CrunchyrollBetaIE(CrunchyrollBetaBaseIE):
 
 class CrunchyrollBetaShowIE(CrunchyrollBetaBaseIE):
     IE_NAME = 'crunchyroll:playlist:beta'
-    _VALID_URL = r'https?://beta\.crunchyroll\.com/(?P<lang>(?:\w{2}(?:-\w{2})?/)?)series/(?P<id>\w+)/(?P<display_id>[\w\-]*)/?(?:\?|$)'
+    _VALID_URL = r'''(?x)
+        https?://beta\.crunchyroll\.com/
+        (?P<lang>(?:\w{2}(?:-\w{2})?/)?)
+        series/(?P<id>\w+)
+        (?:/(?P<display_id>[\w-]+))?/?(?:[?#]|$)'''
     _TESTS = [{
         'url': 'https://beta.crunchyroll.com/series/GY19NQ2QR/Girl-Friend-BETA',
         'info_dict': {
@@ -876,16 +877,12 @@ class CrunchyrollBetaShowIE(CrunchyrollBetaBaseIE):
         },
         'playlist_mincount': 10,
     }, {
-        'url': 'https://beta.crunchyroll.com/it/series/GY19NQ2QR/Girl-Friend-BETA',
+        'url': 'https://beta.crunchyroll.com/it/series/GY19NQ2QR',
         'only_matching': True,
     }]
 
     def _real_extract(self, url):
         lang, internal_id, display_id = self._match_valid_url(url).group('lang', 'id', 'display_id')
-
-        if not self._get_cookies(url).get('etp_rt'):
-            return self._redirect_from_beta(url, lang, internal_id, display_id, False, CrunchyrollShowPlaylistIE.ie_key())
-
         api_domain, bucket, params = self._get_params(lang)
 
         series_response = self._download_json(

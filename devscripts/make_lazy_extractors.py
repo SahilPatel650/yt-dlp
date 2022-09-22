@@ -2,6 +2,7 @@
 
 # Allow direct execution
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,7 +13,9 @@ from inspect import getsource
 from devscripts.utils import get_filename_args, read_file, write_file
 
 NO_ATTR = object()
-STATIC_CLASS_PROPERTIES = ['IE_NAME', 'IE_DESC', 'SEARCH_KEY', '_VALID_URL', '_WORKING', '_NETRC_MACHINE', 'age_limit']
+STATIC_CLASS_PROPERTIES = [
+    'IE_NAME', 'IE_DESC', 'SEARCH_KEY', '_VALID_URL', '_WORKING', '_ENABLED', '_NETRC_MACHINE', 'age_limit'
+]
 CLASS_METHODS = [
     'ie_key', 'working', 'description', 'suitable', '_match_valid_url', '_match_id', 'get_temp_id', 'is_suitable'
 ]
@@ -48,12 +51,13 @@ def get_all_ies():
     PLUGINS_DIRNAME = 'ytdlp_plugins'
     BLOCKED_DIRNAME = f'{PLUGINS_DIRNAME}_blocked'
     if os.path.exists(PLUGINS_DIRNAME):
-        os.rename(PLUGINS_DIRNAME, BLOCKED_DIRNAME)
+        # os.rename cannot be used, e.g. in Docker. See https://github.com/yt-dlp/yt-dlp/pull/4958
+        shutil.move(PLUGINS_DIRNAME, BLOCKED_DIRNAME)
     try:
         from yt_dlp.extractor.extractors import _ALL_CLASSES
     finally:
         if os.path.exists(BLOCKED_DIRNAME):
-            os.rename(BLOCKED_DIRNAME, PLUGINS_DIRNAME)
+            shutil.move(BLOCKED_DIRNAME, PLUGINS_DIRNAME)
     return _ALL_CLASSES
 
 
