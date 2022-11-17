@@ -5,16 +5,16 @@ import time
 from .common import InfoExtractor
 from ..compat import compat_str
 from ..utils import (
+    KNOWN_EXTENSIONS,
     ExtractorError,
     float_or_none,
     int_or_none,
-    KNOWN_EXTENSIONS,
     parse_filesize,
     str_or_none,
     try_get,
-    update_url_query,
     unified_strdate,
     unified_timestamp,
+    update_url_query,
     url_or_none,
     urljoin,
 )
@@ -211,7 +211,7 @@ class BandcampIE(InfoExtractor):
         }
 
 
-class BandcampAlbumIE(BandcampIE):
+class BandcampAlbumIE(BandcampIE):  # XXX: Do not subclass from concrete IE
     IE_NAME = 'Bandcamp:album'
     _VALID_URL = r'https?://(?:(?P<subdomain>[^.]+)\.)?bandcamp\.com/album/(?P<id>[^/?#&]+)'
 
@@ -314,7 +314,7 @@ class BandcampAlbumIE(BandcampIE):
         }
 
 
-class BandcampWeeklyIE(BandcampIE):
+class BandcampWeeklyIE(BandcampIE):  # XXX: Do not subclass from concrete IE
     IE_NAME = 'Bandcamp:weekly'
     _VALID_URL = r'https?://(?:www\.)?bandcamp\.com/?\?(?:.*?&)?show=(?P<id>\d+)'
     _TESTS = [{

@@ -58,8 +58,7 @@ class NRKBaseIE(InfoExtractor):
         return self._download_json(
             urljoin('https://psapi.nrk.no/', path),
             video_id, note or 'Downloading %s JSON' % item,
-            fatal=fatal, query=query,
-            headers={'Accept-Encoding': 'gzip, deflate, br'})
+            fatal=fatal, query=query)
 
 
 class NRKIE(NRKBaseIE):
@@ -736,7 +735,7 @@ class NRKTVSeriesIE(NRKTVSerieBaseIE):
             entries, series_id, titles.get('title'), titles.get('subtitle'))
 
 
-class NRKTVDirekteIE(NRKTVIE):
+class NRKTVDirekteIE(NRKTVIE):  # XXX: Do not subclass from concrete IE
     IE_DESC = 'NRK TV Direkte and NRK Radio Direkte'
     _VALID_URL = r'https?://(?:tv|radio)\.nrk\.no/direkte/(?P<id>[^/?#&]+)'
 
